@@ -1,0 +1,33 @@
+ingestion:
+  # Hierarchical chunker
+  parent_chunk_size: 1000       # tokens
+  child_chunk_size: 200         # tokens
+  chunk_overlap: 20             # tokens
+
+  # Contextual chunker
+  contextual_summary_model: "claude-haiku-4-5-20251001"  # cheap model for context injection
+
+  # Multimodal
+  render_pdf_pages_as_images: true   # render pages with figures to images
+  min_image_area_px: 5000            # ignore images smaller than this (e.g. logos)
+
+retrieval:
+  embedding_model: "text-embedding-3-large"
+  embedding_dimensions: 3072
+  dense_top_k: 20        # candidates from vector search
+  sparse_top_k: 20       # candidates from BM25
+  rerank_top_n: 5        # final chunks passed to LLM after reranking
+  use_hyde: true         # Hypothetical Document Embeddings
+  use_multi_query: true  # multi-query expansion (3 rephrases)
+
+generation:
+  model: "claude-sonnet-4-6"
+  max_tokens: 2048
+  temperature: 0.0       # deterministic for RAG
+  stream: true
+
+evaluation:
+  faithfulness_threshold: 0.80
+  answer_relevance_threshold: 0.75
+  context_precision_threshold: 0.70
+  eval_dataset_path: "eval/datasets"
