@@ -113,6 +113,15 @@ def _expand_period_year_pairs(periods: list[str], years: list[int]) -> list[tupl
         return [(y, periods[0]) for y in years]
     return [(y, p) for y in years for p in periods]
 
+def _expand_tickers(tickers: list[str] | None) -> list[list[str] | None]:
+    """When multiple tickers are detected (a cross-company question), each gets its own
+    retrieval pass instead of being folded into one shared MatchAny filter — otherwise one
+    company's stronger-scoring chunks can crowd the other out of the shared result window.
+    A single or no ticker keeps the original single-pass behavior unchanged."""
+    if tickers and len(tickers) > 1:
+        return [[t] for t in tickers]
+    return [tickers]
+
 def _build_context_string(docs: list[Document]) -> str:
     parts = []
     for doc in docs:
@@ -176,8 +185,15 @@ class LCRAGChain:
             pairs = _expand_period_year_pairs(periods, years)
             if len(pairs) > 1:
                 docs: list[Document] = []
+                # Strip any fiscal_year/fiscal_period the caller's base filter already carries —
+                # each pair sets its own, and ANDing both would make every pair but one impossible
+                # to satisfy (e.g. fiscal_year==2025 AND fiscal_year==2026 never matches).
+                base_conditions = [
+                    c for c in filters.must
+                    if not (isinstance(c, FieldCondition) and c.key in ("fiscal_year", "fiscal_period"))
+                ]
                 for year, period in pairs:
-                    conditions = list(filters.must)
+                    conditions = list(base_conditions)
                     if year is not None:
                         conditions.append(FieldCondition(key="fiscal_year", match=MatchValue(value=year)))
                     if period is not None:
@@ -195,22 +211,24 @@ class LCRAGChain:
         periods = extracted.fiscal_periods if extracted and extracted.fiscal_periods else []
         years = extracted.fiscal_years if extracted and extracted.fiscal_years else []
         pairs = _expand_period_year_pairs(periods, years)
+        ticker_groups = _expand_tickers(extracted.tickers if extracted else None)
 
-        if len(pairs) > 1:
+        if len(pairs) > 1 or len(ticker_groups) > 1:
             docs: list[Document] = []
-            for year, period in pairs:
-                pair_filter = build_filter(
-                    tickers=extracted.tickers,
-                    filing_type=extracted.filing_type,
-                    fiscal_year=year,
-                    fiscal_period=period,
-                )
-                retriever = build_retriever(self.client, self.collection_name, filters=pair_filter)
-                docs.extend(retriever.invoke(question))
+            for tickers in ticker_groups:
+                for year, period in (pairs or [(None, None)]):
+                    group_filter = build_filter(
+                        tickers=tickers,
+                        filing_type=extracted.filing_type if extracted else None,
+                        fiscal_year=year,
+                        fiscal_period=period,
+                    )
+                    retriever = build_retriever(self.client, self.collection_name, filters=group_filter)
+                    docs.extend(retriever.invoke(question))
         else:
             year, period = pairs[0] if pairs else (None, None)
             single_filter = build_filter(
-                tickers=extracted.tickers if extracted else None,
+                tickers=ticker_groups[0],
                 filing_type=extracted.filing_type if extracted else None,
                 fiscal_year=year,
                 fiscal_period=period,

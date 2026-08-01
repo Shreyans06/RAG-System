@@ -21,6 +21,8 @@ from src.ingestion.models import Chunk
 DENSE_VECTOR_NAME = "dense"
 SPARSE_VECTOR_NAME = "sparse"
 
+_UPSERT_BATCH_SIZE = 100
+
 
 _KEYWORD_INDEX_FIELDS = ["ticker", "filing_type", "fiscal_period", "cik"]
 _INTEGER_INDEX_FIELDS = ["fiscal_year"]
@@ -99,7 +101,11 @@ def upsert_chunks(
                 }
             )
         )
-    client.upsert(collection_name = collection_name, points = points)
+    # Qdrant's REST API caps request payloads at 32MB; a single large filing's worth of
+    # points (dense + sparse vectors + full chunk text) can exceed that in one call, so
+    # upsert in batches rather than all-at-once.
+    for i in range(0, len(points), _UPSERT_BATCH_SIZE):
+        client.upsert(collection_name=collection_name, points=points[i:i + _UPSERT_BATCH_SIZE])
 
 def search(
         client: QdrantClient,

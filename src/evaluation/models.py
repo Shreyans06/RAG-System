@@ -9,6 +9,16 @@ class QuestionType(StrEnum):
     COMPARATIVE = "comparative"
     MULTI_HOP = "multi-hop"
     UNANSWERABLE = "unanswerable"
+    ADVERSARIAL = "adversarial"
+
+@dataclass
+class EvalTurn:
+    """A follow-up question in a multi-turn EvalExample, scored against its own
+    ground truth but sharing the parent example's conversation session."""
+
+    question: str
+    ground_truth_answer: str
+    ground_truth_excerpt: str
 
 @dataclass
 class EvalExample:
@@ -21,6 +31,7 @@ class EvalExample:
     ground_truth_answer: str
     ground_truth_excerpt: str
     difficulty: str = "medium" # "easy"
+    follow_ups: list[EvalTurn] = field(default_factory=list)
 
 @dataclass
 class EvalResult:

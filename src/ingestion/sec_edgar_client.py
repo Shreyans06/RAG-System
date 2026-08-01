@@ -88,30 +88,38 @@ class SECEdgarClient:
     def get_filings(self, ticker: str, filing_types: list[str], years: list[int] | None = None) -> list[dict]:
         cik = self.get_cik(ticker)
         submissions = self._get_json(_SUBMISSIONS_URL.format(cik=cik))
-        recent = submissions["filings"]["recent"]
         fiscal_year_end = submissions.get("fiscalYearEnd")
 
+        # "recent" only holds the ~1000 most-recent filings of ANY form type for this CIK.
+        # Companies that file frequently (8-Ks, proxies, etc.) push older 10-K/10-Qs out of
+        # that window into separate paginated pages listed under filings.files — fetch those
+        # too, or older filings silently go missing with no error.
+        pages = [submissions["filings"]["recent"]]
+        for older in submissions["filings"].get("files", []):
+            pages.append(self._get_json(f"https://data.sec.gov/submissions/{older['name']}"))
+
         results = []
-        for i, form in enumerate(recent["form"]):
-            if form not in filing_types:
-                continue
-            report_date = recent["reportDate"][i]
-            fiscal_year, fiscal_period = _infer_fiscal_year_and_period(form, report_date, fiscal_year_end)
-            if years is not None and fiscal_year not in years:
-                continue
-            results.append(
-                {
-                    "ticker": ticker.upper(),
-                    "cik": cik,
-                    "company": submissions.get("name", ticker.upper()),
-                    "filing_type": form,
-                    "filing_date": recent["filingDate"][i],
-                    "fiscal_year": fiscal_year,
-                    "fiscal_period": fiscal_period,
-                    "accession_number": recent["accessionNumber"][i],
-                    "primary_document": recent["primaryDocument"][i],
-                }
-            )
+        for page in pages:
+            for i, form in enumerate(page["form"]):
+                if form not in filing_types:
+                    continue
+                report_date = page["reportDate"][i]
+                fiscal_year, fiscal_period = _infer_fiscal_year_and_period(form, report_date, fiscal_year_end)
+                if years is not None and fiscal_year not in years:
+                    continue
+                results.append(
+                    {
+                        "ticker": ticker.upper(),
+                        "cik": cik,
+                        "company": submissions.get("name", ticker.upper()),
+                        "filing_type": form,
+                        "filing_date": page["filingDate"][i],
+                        "fiscal_year": fiscal_year,
+                        "fiscal_period": fiscal_period,
+                        "accession_number": page["accessionNumber"][i],
+                        "primary_document": page["primaryDocument"][i],
+                    }
+                )
         return results
 
 

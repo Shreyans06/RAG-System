@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from src.evaluation.models import EvalExample, QuestionType
+from src.evaluation.models import EvalExample, EvalTurn, QuestionType
 
 
 def load_eval_dataset(path: str | Path) -> list[EvalExample]:
@@ -15,6 +15,7 @@ def load_eval_dataset(path: str | Path) -> list[EvalExample]:
             raw = json.loads(line)
             try:
                 raw["question_type"] = QuestionType(raw["question_type"])
+                raw["follow_ups"] = [EvalTurn(**t) for t in raw.get("follow_ups", [])]
                 examples.append(EvalExample(**raw))
             except (KeyError , ValueError) as e:
                 raise ValueError(f"Error parsing line / Invalid format at line {line_num} in {path}: {e}")

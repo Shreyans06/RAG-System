@@ -7,7 +7,8 @@ from pathlib import Path
 from src.config import get_settings
 from src.evaluation.dataset import load_eval_dataset
 from src.evaluation.metrics import build_judge_embeddings, build_judge_llm, compute_ragas_metrics
-from src.evaluation.models import EvalExample, EvalReport, EvalResult
+from src.evaluation.models import EvalReport, EvalResult
+from src.generation.history import get_session_history
 from src.generation.lc_rag_chain import LCRAGChain
 from src.retrieval.filters import build_filter
 from src.retrieval.vector_store import make_client
@@ -27,6 +28,38 @@ def _mean(values: list[float | None]) -> float | None:
     return sum(filtered_values) / len(filtered_values) if filtered_values else None
 
 
+def _run_turn(
+    chain: LCRAGChain,
+    example_id: str,
+    question: str,
+    ground_truth_excerpt: str,
+    session_id: str | None,
+    filters,
+) -> EvalResult:
+    start = time.perf_counter()
+    try:
+        output = chain.query(question, session_id=session_id, filters=filters)
+    except Exception as e:
+        return EvalResult(example_id=example_id, question=question, answer="", mode="lc_rag_chain", error=str(e))
+
+    latency = (time.perf_counter() - start) * 1000  # Convert to milliseconds
+    contexts = output.get("contexts", [])
+    excerpt_found = any(ground_truth_excerpt.lower() in ctx.lower() for ctx in contexts)
+
+    return EvalResult(
+        example_id=example_id,
+        question=question,
+        answer=output.get("answer", ""),
+        retrieved_chunk_ids=[s["chunk_id"] for s in output["sources"]],
+        retrieved_contexts=contexts,
+        citation_precision=output.get("citation_precision"),
+        citation_coverage=output.get("citation_coverage"),
+        excerpt_found_in_retrieval=excerpt_found,
+        latency_ms=latency,
+        mode="lc_rag_chain",
+    )
+
+
 def run_eval(
     dataset_path: str,
     limit: int | None = None,
@@ -39,46 +72,39 @@ def run_eval(
     chain = _build_rag_chain(settings)
 
     results: list[EvalResult] = []
+    ground_truth_by_id: dict[str, str] = {}
+    question_type_by_id: dict[str, str] = {}
+
     for example in examples:
-        start = time.perf_counter()
-        try:
-            filters = build_filter(
-                tickers=[example.ticker] if example.ticker else None,
-                filing_type=example.filing_type or None,
-                fiscal_year=example.fiscal_year,
-            )
-            output = chain.query(example.question, filters=filters)
-        except Exception as e:
-            results.append(
-                EvalResult(
-                    example_id=example.id,
-                    question=example.question,
-                    answer="",
-                    mode="lc_rag_chain",
-                    error=str(e),
-                )
-            )
-            continue
+        filters = build_filter(
+            tickers=[example.ticker] if example.ticker else None,
+            filing_type=example.filing_type or None,
+            fiscal_year=example.fiscal_year,
+        )
 
-        latency = (time.perf_counter() - start) * 1000  # Convert to milliseconds
-
-        contexts = output.get("contexts", [])
-        excerpt_found = any(example.ground_truth_excerpt.lower() in ctx.lower() for ctx in contexts)
+        # Multi-turn examples get a dedicated conversation session so follow-ups can
+        # exercise real condense-question + Redis-backed memory resolution; single-turn
+        # examples keep session_id=None, identical to the original stateless behavior.
+        session_id = f"eval-{example.id}" if example.follow_ups else None
+        if session_id:
+            get_session_history(session_id).clear()
 
         results.append(
-            EvalResult(
-                example_id=example.id,
-                question=example.question,
-                answer=output.get("answer", ""),
-                retrieved_chunk_ids=[s["chunk_id"] for s in output["sources"]],
-                retrieved_contexts=contexts,
-                citation_precision=output.get("citation_precision"),
-                citation_coverage=output.get("citation_coverage"),
-                excerpt_found_in_retrieval=excerpt_found,
-                latency_ms=latency,
-                mode="lc_rag_chain",
-            )
+            _run_turn(chain, example.id, example.question, example.ground_truth_excerpt, session_id, filters)
         )
+        ground_truth_by_id[example.id] = example.ground_truth_answer
+        question_type_by_id[example.id] = example.question_type.value
+
+        for i, follow_up in enumerate(example.follow_ups, start=1):
+            turn_id = f"{example.id}-f{i}"
+            # Deliberately no explicit filters here — the point is testing whether
+            # conversation memory + condense-question resolve context on their own,
+            # the same way a real multi-turn chat session would.
+            results.append(
+                _run_turn(chain, turn_id, follow_up.question, follow_up.ground_truth_excerpt, session_id, None)
+            )
+            ground_truth_by_id[turn_id] = follow_up.ground_truth_answer
+            question_type_by_id[turn_id] = example.question_type.value
 
     scored = [r for r in results if r.error is None]
     if scored:
@@ -92,12 +118,11 @@ def run_eval(
             model=settings.evaluation.get("judge_embedding_model", "text-embedding-3-small"),
         )
 
-        example_by_id = {ex.id: ex for ex in examples}
         per_row = compute_ragas_metrics(
             questions=[r.question for r in scored],
             answers=[r.answer for r in scored],
             contexts=[r.retrieved_contexts for r in scored],
-            ground_truths=[example_by_id[r.example_id].ground_truth_answer for r in scored],
+            ground_truths=[ground_truth_by_id[r.example_id] for r in scored],
             judge_llm=judge_llm,
             judge_embeddings=judge_embeddings,
             metric_names=ragas_metrics,
@@ -129,15 +154,15 @@ def run_eval(
             "dataset_path": str(dataset_path),
             "mode": "lc_rag_chain",
             "num_examples": len(examples),
+            "num_turns": len(results),
             "timestamp": datetime.now(UTC).isoformat(),
         },
     )
-    _write_report(report, examples)
+    _write_report(report, question_type_by_id)
     return report
 
 
-def _write_report(report: EvalReport, examples: list[EvalExample]) -> None:
-    example_by_id = {ex.id : ex for ex in examples}
+def _write_report(report: EvalReport, question_type_by_id: dict[str, str]) -> None:
     reports_dir = Path("eval/reports")
     reports_dir.mkdir(parents=True , exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -156,7 +181,7 @@ def _write_report(report: EvalReport, examples: list[EvalExample]) -> None:
         "|---|---|---|---|---|---|",
     ]
     for r in report.results:
-        qtype = example_by_id[r.example_id].question_type.value
+        qtype = question_type_by_id.get(r.example_id, "")
         lines.append(
             f"| {r.example_id} | {qtype} "
             f"| {r.faithfulness if r.faithfulness is not None else 'N/A'} "
