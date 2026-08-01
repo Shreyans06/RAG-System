@@ -1,6 +1,6 @@
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import redis
 
@@ -13,7 +13,7 @@ def _get_redis() -> redis.Redis:
     return redis.from_url(settings.REDIS_URL)
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 def create_job(ticker: str, filing_types: list[str], years: list[int]) -> str:
     job_id = str(uuid.uuid4())[:8]

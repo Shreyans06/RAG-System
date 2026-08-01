@@ -2,11 +2,12 @@ import argparse
 import sys
 import time
 
+from qdrant_client.models import SparseVector
+
 from src.config import get_settings
 from src.ingestion.pipeline import ChunkingStrategy, IngestionPipeline
 from src.ingestion.sec_edgar_client import SECEdgarClient
 from src.ingestion.sec_metadata import SECMetadata
-from qdrant_client.models import SparseVector
 from src.models.factory import get_embeddings, get_sparse_embeddings
 from src.retrieval.vector_store import create_collection_if_not_exists, make_client, upsert_chunks
 

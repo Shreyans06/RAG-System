@@ -1,5 +1,5 @@
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from qdrant_client.models import SparseVector
 
@@ -13,7 +13,7 @@ from src.retrieval.vector_store import create_collection_if_not_exists, make_cli
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _build_sec_metadata(filing: dict) -> SECMetadata:

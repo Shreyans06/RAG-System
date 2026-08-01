@@ -1,20 +1,17 @@
 import hashlib
 import logging
+import re
 from enum import StrEnum
 from pathlib import Path
 
 from src.ingestion.chunkers.hierarchical_chunker import hierarchical_chunker
 from src.ingestion.chunkers.sec_section_splitter import split_sec_sections
 from src.ingestion.chunkers.semantic_chunker import chunk_with_context
+from src.ingestion.chunkers.table_describer import describe_table
 from src.ingestion.document_loader import load_document
 from src.ingestion.models import Chunk, ContentType, IngestionItem, IngestResult
-from src.ingestion.chunkers.table_describer import describe_table
-
 from src.ingestion.multimodal.table_extractor import extract_tables_from_pdf
 from src.ingestion.sec_metadata import SECMetadata
-import re
-
-
 
 try:
     from src.ingestion.multimodal.image_extractor import (
@@ -28,7 +25,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 _IMAGE_SUFFIXES = {".png" , ".jpg" , ".jpeg" , ".webp"}
-_JUNK_CAPTION_PATTERN = re.compile(r"\|")  # SEC page-footers use pipe-delimited "Company | Form | Page N" text; real prose never contains a literal pipe
+# SEC page-footers use pipe-delimited "Company | Form | Page N" text;
+# real prose never contains a literal pipe
+_JUNK_CAPTION_PATTERN = re.compile(r"\|")
 
 
 def _build_table_content(doc: IngestionItem, api_key: str | None, model: str) -> str:

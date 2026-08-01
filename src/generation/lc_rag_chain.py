@@ -13,13 +13,11 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue
 from src.config import get_settings
 from src.evaluation.citation_metrics import compute_citation_metrics
 from src.generation.history import get_session_history
+from src.generation.tools import check_ingestion_status_tool, ingest_company_filings_tool
 from src.models.factory import get_chat_model
 from src.observability.logging import log_query_event
 from src.retrieval.filters import build_filter, extract_filters_raw
 from src.retrieval.retriever_factory import build_retriever
-
-from src.generation.tools import check_ingestion_status_tool, ingest_company_filings_tool
-
 
 _TOOLS = [ingest_company_filings_tool, check_ingestion_status_tool]
 

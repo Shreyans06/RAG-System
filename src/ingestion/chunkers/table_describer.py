@@ -24,7 +24,7 @@ _CACHE_PATH = Path("data/.cache/table_description_cache.jsonl")
 
 
 def _cache_key(table_markdown: str, caption: str, section: str) -> str:
-    return hashlib.sha256(f"{section}:{caption}:{table_markdown}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{section}:{caption}:{table_markdown}".encode()).hexdigest()
 
 
 def _load_cache() -> dict[str, str]:
@@ -60,7 +60,9 @@ def _call_claude(client: anthropic.Anthropic, model: str, section: str, caption:
     return response.content[0].text.strip()
 
 
-def describe_table(section: str, caption: str, table_markdown: str, api_key: str, model: str = "claude-haiku-4-5") -> str:
+def describe_table(
+    section: str, caption: str, table_markdown: str, api_key: str, model: str = "claude-haiku-4-5"
+) -> str:
     """Convert a table into a natural-language paragraph for embedding/reranking purposes,
     since cross-encoder rerankers systematically score raw markdown-table syntax below
     prose regardless of relevance (see D-16). Retries transient failures; on final
