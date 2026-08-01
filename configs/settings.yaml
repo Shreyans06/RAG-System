@@ -5,13 +5,19 @@ ingestion:
   chunk_overlap: 20             # tokens
 
   # Contextual chunker
-  contextual_summary_model: "claude-haiku-4-5-20251001"  # cheap model for context injection
+  contextual_summary_provider: "anthropic"
+  contextual_summary_model: "claude-haiku-4-5"  # cheap model for context injection
 
   # Multimodal
   render_pdf_pages_as_images: true   # render pages with figures to images
   min_image_area_px: 5000            # ignore images smaller than this (e.g. logos)
 
 retrieval:
+  embedding_provider: "openai"
+  sparse_embedding_model: "Qdrant/bm25"
+  rerank_provider: "cohere"
+  query_transform_provider: "openai"
+  query_transform_model: "gpt-5.4"
   embedding_model: "text-embedding-3-large"
   embedding_dimensions: 3072
   dense_top_k: 20        # candidates from vector search
@@ -19,15 +25,25 @@ retrieval:
   rerank_top_n: 5        # final chunks passed to LLM after reranking
   use_hyde: true         # Hypothetical Document Embeddings
   use_multi_query: true  # multi-query expansion (3 rephrases)
+  min_relevance_score: 0.1  # below this, refuse rather than risk a low-confidence answer
 
 generation:
-  model: "claude-sonnet-4-6"
+  provider: "anthropic"
+  model: "claude-sonnet-5"
   max_tokens: 2048
   temperature: 0.0       # deterministic for RAG
   stream: true
 
 evaluation:
   faithfulness_threshold: 0.80
-  answer_relevance_threshold: 0.75
+  answer_relevancy_threshold: 0.75
   context_precision_threshold: 0.70
-  eval_dataset_path: "eval/datasets"
+
+memory:
+  session_ttl_seconds: 1800  # 30 min of inactivity before a session's history expires
+  max_history_messages: 6    # last 3 turns (human+ai pairs) kept in the prompt
+  eval_dataset_path: "eval/datasets/sec_qa_v1.jsonl"
+  judge_provider: "openai"
+  judge_model: "gpt-5.4-mini"
+  judge_embedding_model: "text-embedding-3-small"
+

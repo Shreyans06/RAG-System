@@ -1,9 +1,10 @@
 
-from enum import Enum
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
-class ContentType(str, Enum):
+
+class ContentType(StrEnum):
     TEXT = "text"
     TABLE = "table"
     IMAGE = "image"
@@ -25,7 +26,7 @@ class Chunk:
     metadata: dict[str, Any] = field(default_factory=dict)
     token_count: int = 0
     embedding: list[float] = field(default_factory=list)
-
-
-
-
+@dataclass
+class IngestResult:
+    chunks: list[Chunk] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)

@@ -3,16 +3,15 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
-from qdrant_client.models import FieldCondition, Filter, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchValue, SparseVector
 
 from src.api.models import IngestResponse
 from src.ingestion.pipeline import ChunkingStrategy, IngestionPipeline
-from src.retrieval.bm25_retriever import BM25Retriever
-from src.retrieval.embeddings import embed_texts
-from src.retrieval.hybrid_retriever import HybridRetriever
+from src.models.factory import get_embeddings, get_sparse_embeddings
 from src.retrieval.vector_store import (
     create_collection_if_not_exists,
     delete_collection,
+    list_distinct_payload_values,
     upsert_chunks,
 )
 
@@ -41,34 +40,32 @@ async def ingest(file: UploadFile, request: Request) -> IngestResponse:
             child_chunk_size=settings.ingestion.get("child_chunk_size", 200),
             chunk_overlap=settings.ingestion.get("chunk_overlap", 20),
         )
-        chunks = pipeline.ingest(tmp_path)
+        result = pipeline.ingest(tmp_path)
 
-    embeddings = embed_texts(
-        [c.content for c in chunks],
-        api_key=settings.OPENAI_API_KEY,
-        model=settings.retrieval.get("embedding_model", "text-embedding-3-large"),
-    )
+    chunks = result.chunks
+    if not chunks:
+        detail = "; ".join(result.errors) or "no extractable content"
+        raise HTTPException(status_code=422, detail=f"Ingestion produced no chunks: {detail}")
 
-    upsert_chunks(request.app.state.qdrant, settings.QDRANT_COLLECTION_NAME, chunks, embeddings)
+    dense_model = get_embeddings()
+    dense_embeddings = dense_model.embed_documents([c.content for c in chunks])
 
-    request.app.state.all_chunks.extend(chunks)
-    request.app.state.ingested_files.add(file.filename)
-    request.app.state.bm25.build_index(request.app.state.all_chunks)
+    sparse_model = get_sparse_embeddings()
+    sparse_raw = sparse_model.embed_documents([c.content for c in chunks])
+    sparse_embeddings = [SparseVector(indices=v.indices, values=v.values) for v in sparse_raw]
 
-    request.app.state.hybrid_retriever = HybridRetriever(
-        qdrant_client=request.app.state.qdrant,
-        collection_name=settings.QDRANT_COLLECTION_NAME,
-        bm25_retriever=request.app.state.bm25,
-        openai_api_key=settings.OPENAI_API_KEY,
-        embedding_model=settings.retrieval.get("embedding_model", "text-embedding-3-large"),
-        top_k=settings.retrieval.get("dense_top_k", 20),
+    upsert_chunks(
+        request.app.state.qdrant, settings.QDRANT_COLLECTION_NAME, chunks,
+        dense_embeddings, sparse_embeddings=sparse_embeddings,
     )
 
     return IngestResponse(
         filename=file.filename,
         chunks_created=len(chunks),
         processing_time_seconds=round(time.perf_counter() - start, 2),
+        errors=result.errors,
     )
+
 
 
 @router.get("/status")
@@ -87,52 +84,24 @@ async def clear_documents(request: Request) -> dict:
         settings.QDRANT_COLLECTION_NAME,
         vector_size=settings.retrieval.get("embedding_dimensions", 3072),
     )
-    request.app.state.all_chunks = []
-    request.app.state.ingested_files = set()
-    request.app.state.bm25 = BM25Retriever()
-    if hasattr(request.app.state, "hybrid_retriever"):
-        del request.app.state.hybrid_retriever
     return {"cleared": True}
 
 
 @router.get("/documents")
 async def list_documents(request: Request) -> dict:
-    return {"files": sorted(request.app.state.ingested_files)}
-
+    settings = request.app.state.settings
+    files = list_distinct_payload_values(request.app.state.qdrant, settings.QDRANT_COLLECTION_NAME, "filename")
+    return {"files": files}
 
 @router.delete("/documents/{filename}")
 async def delete_document(filename: str, request: Request) -> dict:
     settings = request.app.state.settings
-    if filename not in request.app.state.ingested_files:
+    files = list_distinct_payload_values(request.app.state.qdrant, settings.QDRANT_COLLECTION_NAME, "filename")
+    if filename not in files:
         raise HTTPException(status_code=404, detail=f"{filename} not found")
 
-    # Remove from Qdrant by filtering on payload filename
     request.app.state.qdrant.delete(
         collection_name=settings.QDRANT_COLLECTION_NAME,
-        points_selector=Filter(
-            must=[FieldCondition(key="filename", match=MatchValue(value=filename))]
-        ),
+        points_selector=Filter(must=[FieldCondition(key="filename", match=MatchValue(value=filename))]),
     )
-
-    # Rebuild BM25 without deleted file's chunks
-    request.app.state.all_chunks = [
-        c for c in request.app.state.all_chunks if c.metadata.get("filename") != filename
-    ]
-    request.app.state.ingested_files.discard(filename)
-
-    if request.app.state.all_chunks:
-        request.app.state.bm25.build_index(request.app.state.all_chunks)
-        request.app.state.hybrid_retriever = HybridRetriever(
-            qdrant_client=request.app.state.qdrant,
-            collection_name=settings.QDRANT_COLLECTION_NAME,
-            bm25_retriever=request.app.state.bm25,
-            openai_api_key=settings.OPENAI_API_KEY,
-            embedding_model=settings.retrieval.get("embedding_model", "text-embedding-3-large"),
-            top_k=settings.retrieval.get("dense_top_k", 20),
-        )
-    else:
-        request.app.state.bm25 = BM25Retriever()
-        if hasattr(request.app.state, "hybrid_retriever"):
-            del request.app.state.hybrid_retriever
-
     return {"deleted": filename}

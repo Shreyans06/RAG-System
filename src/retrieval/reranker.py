@@ -3,6 +3,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.ingestion.models import Chunk
 
+
 def rerank(
         query: str,
         chunks: list[Chunk],

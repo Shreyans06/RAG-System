@@ -1,4 +1,4 @@
-# Environment
+# Environment / secrets — never bake into the image
 .env
 *.env
 
@@ -14,40 +14,32 @@ dist/
 build/
 .eggs/
 
-# Testing
+# Testing / type checking
 .pytest_cache/
 .coverage
 htmlcov/
-*.xml
-
-# Type checking
 .mypy_cache/
 
-# IDE
+# IDE / OS
 .vscode/
 .idea/
-
-# OS
 .DS_Store
 Thumbs.db
 
-# Qdrant local storage
+# Local runtime data (re-fetchable / regenerable, not needed in the image)
 qdrant_storage/
-
-# Uploaded documents (not for git)
 uploads/
 sample_docs/
-
-# Downloaded SEC filings + EDGAR ticker cache (not for git — re-fetchable, and grows with usage)
 data/raw/
 data/.cache/
-
-# Evaluation outputs
 eval/reports/
-*.json.report
-
-# Local structured query log
 logs/
+
+# Git / docs not needed at runtime
+.git/
+.github/
+docs/
+*.md
 
 # Jupyter
 .ipynb_checkpoints/

@@ -1,6 +1,8 @@
-import time 
-from tenacity import retry, stop_after_attempt, wait_exponential
+import time
+
 import openai
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 
 def embed_texts(
         texts: list[str],
