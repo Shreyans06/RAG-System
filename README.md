@@ -16,18 +16,22 @@ Ingests SEC filings (fetched via the EDGAR API, with authoritative ticker/CIK/fi
 > **Q:** What is the capital of France and how many moons does Jupiter have?
 > **A:** I don't have information about that in the ingested filings.
 >
-> *(This is a deterministic refusal, not the model's judgment call — retrieval's reranked relevance scores fall below a calibrated threshold, so the system never even calls the generation model. See D-16/guardrails in the decision log.)*
+> *(This is a deterministic refusal, not the model's judgment call — retrieval's reranked relevance scores fall below a calibrated threshold, so the system never even calls the generation model. See D-7/guardrails in the decision log.)*
+
+> **Q (typed straight into the chat, not a CLI command):** "Add Tesla's most recent 10-K"
+> **A:** Kicks off ingestion as a background job and returns immediately with a job ID; a follow-up like "is Tesla ready yet?" checks status without needing to remember it. No separate ingestion UI required — the same chat model that answers questions also recognizes and dispatches ingestion requests via tool-calling. See D-18.
 
 ## Architecture, in brief
 
-- **Ingestion:** EDGAR API client → HTML/table parsing (iXBRL-aware) → SEC section-boundary-aware chunking (Item 1, 1A, 7, 7A...) → hierarchical chunking, with content-hash IDs so re-ingestion is idempotent.
-- **Retrieval:** Qdrant native hybrid search (dense + BM25-as-sparse-vector, server-side RRF fusion) → HyDE → multi-query expansion → Cohere reranking, with auto-extracted metadata filters (ticker/filing-type/fiscal-year/quarter) inferred from the question itself.
-- **Generation:** LangChain/LCEL chain over a provider-agnostic model factory (swap Anthropic ⇄ OpenAI ⇄ Ollama via config, not code), with mandatory inline citations and a deterministic out-of-scope refusal when retrieval confidence is too low.
+- **Ingestion:** EDGAR API client → HTML/table parsing (iXBRL-aware) → SEC section-boundary-aware chunking (Item 1, 1A, 7, 7A...) → hierarchical chunking, with content-hash IDs so re-ingestion is idempotent. Tables get an LLM-generated natural-language description prepended at ingestion time (D-16) — the reranker otherwise systematically scores raw markdown-table syntax below prose, regardless of relevance.
+- **Retrieval:** Qdrant native hybrid search (dense + sparse vectors, server-side RRF fusion) → HyDE → multi-query expansion → Cohere reranking, with auto-extracted metadata filters (ticker/filing-type/fiscal-year/quarter) inferred from the question itself. Comparative questions spanning multiple periods or years ("Q2 2026 vs Q2 2025") run a separate retrieval pass per period/year and combine the results, so one period can't crowd the other out of the context window (D-19).
+- **Generation:** LangChain/LCEL chain over a provider-agnostic model factory (swap Anthropic ⇄ OpenAI ⇄ Ollama via config, not code), with mandatory inline citations and a deterministic out-of-scope refusal when retrieval confidence is too low. Currently configured on `claude-sonnet-5`, chosen after head-to-head eval testing showed it handling large, redundant multi-chunk contexts more reliably than GPT-family models (D-19).
+- **Chat-driven ingestion:** the chat model itself recognizes ingestion requests (via LangChain tool-calling) and dispatches them as background jobs, distinct from normal question-answering (D-18).
 - **Memory:** Redis-backed, session-scoped conversation history with a condense-question step, so follow-ups like "what about Q3?" resolve correctly without restating the company/period.
 - **Evaluation:** A hand-written, hand-verified golden Q&A set scored with RAGAS (faithfulness, answer relevancy, context precision/recall) using an independent OpenAI judge, plus rule-based citation-precision/coverage metrics — `make eval`.
 - **Observability:** LangSmith tracing (retrieval → rerank → generation, full pipeline visibility) plus a local structured JSON query log as a fallback/complement.
 
-Full detail, including the specific bugs this surfaced (fiscal-quarter boundary edge cases, a reranker that systematically demotes tables below prose, a citation-ID collision bug caught by the observability work itself) is in [docs/DECISIONS.md](docs/DECISIONS.md).
+Full detail, including the specific bugs this surfaced (fiscal-quarter boundary edge cases, a reranker that systematically demotes tables below prose, a citation-ID collision bug caught by the observability work itself, and a GPT-vs-Claude generation-quality gap on noisy multi-chunk context) is in [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Running it
 
@@ -62,9 +66,9 @@ make lint
 
 ## Evaluation methodology
 
-The golden set (`eval/datasets/sec_qa_v1.jsonl`) is hand-written and hand-verified against the actual ingested filings, deliberately including factual, numerical, comparative, multi-hop, and unanswerable question types — the last category specifically tests that the system refuses rather than hallucinates. Scores come from an independent OpenAI judge (not the same model family as the generator, to avoid self-grading bias), combined with rule-based citation metrics that check whether cited chunk IDs were actually supplied and whether numeric claims carry a citation at all.
+The golden set (`eval/datasets/sec_qa_v1.jsonl`) is hand-written and hand-verified against the actual ingested filings, deliberately including factual, numerical, comparative, multi-hop, and unanswerable question types — the last category specifically tests that the system refuses rather than hallucinates. Scores come from an independent OpenAI judge (not the same model family as the generator, to avoid self-grading bias), combined with rule-based citation metrics (`citation_precision`/`citation_coverage`) that check whether cited chunk IDs were actually among those supplied to the model.
 
-Full rationale for every methodology choice — why hand-written over LLM-generated, why an independent judge, why RAGAS — is in [docs/DECISIONS.md](docs/DECISIONS.md) (D-1, D-3).
+Full rationale for every methodology choice — why hand-written over LLM-generated, why an independent judge, why RAGAS, and why an earlier `unsupported_numeric_claims` metric was removed after it turned out to mostly flag false positives (numbered-list markers, quarter labels, abbreviation periods) rather than real unsupported claims — is in [docs/DECISIONS.md](docs/DECISIONS.md) (D-1, D-3, D-20).
 
 ## Observability
 
@@ -76,6 +80,6 @@ Scoped out deliberately, not silently omitted:
 
 - **XBRL structured-numeric lookup** — bypassing chunk retrieval entirely for exact numeric facts would strengthen the "correct every time" story specifically for numbers, but is a meaningful chunk of additional work beyond this pass's scope.
 - **Cached public demo** — a hosted, pre-computed demo page (serving cached answers from an eval run, zero marginal cost per visitor, no live API exposure) is planned but not yet built; see D-6.
-- **Reranker table-demotion (D-16, open)** — the Cohere reranker systematically scores narrative prose above answer-bearing tables for numerical questions, a real, root-caused, currently-unfixed gap. Documented in detail in the decision log rather than silently left as a known-bad behavior.
+- **Multi-table-per-filing disambiguation (D-19, open)** — when a single filing contains several tables (e.g. an income statement and a separate segment breakdown), the reranker doesn't always surface the *specific* table a question needs, for both single-period and cross-period/cross-year comparative questions. Narrower and longer-tail than the table-vs-prose bias fixed in D-16; documented rather than silently left as a known-bad behavior.
 - **Multimodal image pipeline (discovered, not wired in)** — `image_extractor.py`/`vision_processor.py` exist and function standalone but were never actually wired into the main ingestion pipeline (`pipeline.py`); PDF image extraction/description is not currently part of the live ingestion flow.
 - **Automated test suite** — this project leaned on extensive live/real-API verification throughout development (every feature was checked against a real Qdrant instance, real LLM calls, real HTTP requests) rather than a parallel automated test suite; that tradeoff was made deliberately given the project's scope, not by default.
