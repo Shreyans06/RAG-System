@@ -2,8 +2,11 @@ import hashlib
 import json
 from pathlib import Path
 
-import anthropic
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage
 from tenacity import retry, stop_after_attempt, wait_exponential
+
+from src.models.factory import get_chat_model
 
 _DESCRIBE_PROMPT = """\
 Convert this financial table into a concise natural-language paragraph (3-6 sentences) \
@@ -47,22 +50,21 @@ def _append_cache(key: str, description: str) -> None:
         f.write(json.dumps({"hash": key, "description": description}) + "\n")
 
 
+def _extract_text(content: str | list) -> str:
+    if isinstance(content, str):
+        return content
+    return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-def _call_claude(client: anthropic.Anthropic, model: str, section: str, caption: str, table_markdown: str) -> str:
-    response = client.messages.create(
-        model=model,
-        max_tokens=300,
-        messages=[{
-            "role": "user",
-            "content": _DESCRIBE_PROMPT.format(section=section, caption=caption, table_markdown=table_markdown[:3000]),
-        }],
-    )
-    return response.content[0].text.strip()
+def _call_model(model: BaseChatModel, section: str, caption: str, table_markdown: str) -> str:
+    response = model.invoke([HumanMessage(
+        content=_DESCRIBE_PROMPT.format(section=section, caption=caption, table_markdown=table_markdown[:3000])
+    )])
+    return _extract_text(response.content).strip()
 
 
-def describe_table(
-    section: str, caption: str, table_markdown: str, api_key: str, model: str = "claude-haiku-4-5"
-) -> str:
+def describe_table(section: str, caption: str, table_markdown: str) -> str:
     """Convert a table into a natural-language paragraph for embedding/reranking purposes,
     since cross-encoder rerankers systematically score raw markdown-table syntax below
     prose regardless of relevance (see D-16). Retries transient failures; on final
@@ -73,9 +75,8 @@ def describe_table(
     if key in cache:
         return cache[key]
 
-    client = anthropic.Anthropic(api_key=api_key)
     try:
-        description = _call_claude(client, model, section, caption, table_markdown)
+        description = _call_model(get_chat_model("contextual"), section, caption, table_markdown)
     except Exception:
         return ""  # fail open — ship the table without a prose description
 

@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -28,6 +29,15 @@ def _mean(values: list[float | None]) -> float | None:
     return sum(filtered_values) / len(filtered_values) if filtered_values else None
 
 
+def _normalize_whitespace(text: str) -> str:
+    """SEC filing HTML/PDF extraction leaves line-wrap whitespace (newlines, run-on
+    indentation) inside sentences that read as continuous prose — a ground-truth excerpt
+    spanning one of those wrap points would never match a naive substring check even
+    though the real content is present and correct. Collapse all whitespace runs to a
+    single space before comparing."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _run_turn(
     chain: LCRAGChain,
     example_id: str,
@@ -44,7 +54,8 @@ def _run_turn(
 
     latency = (time.perf_counter() - start) * 1000  # Convert to milliseconds
     contexts = output.get("contexts", [])
-    excerpt_found = any(ground_truth_excerpt.lower() in ctx.lower() for ctx in contexts)
+    normalized_excerpt = _normalize_whitespace(ground_truth_excerpt).lower()
+    excerpt_found = any(normalized_excerpt in _normalize_whitespace(ctx).lower() for ctx in contexts)
 
     return EvalResult(
         example_id=example_id,

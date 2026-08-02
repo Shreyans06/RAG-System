@@ -26,7 +26,8 @@ You are a helpful assistant that answers questions based strictly on the provide
 
 Rules:
 1. Only use information from the provided context to answer questions.
-2. After EVERY factual claim, add a citation using the chunk ID shown in the context, e.g. [a1b2c3d4].
+2. After EVERY factual claim, add a citation using the number shown in brackets before that \
+source in the context, e.g. [1]. Reuse the same number if you cite that same source again.
 3. If the context contains a table relevant to the answer, reference it.
 4. If the answer is not in the context, say exactly "I don't have enough information to answer this."
 5. Do not make up information or use prior knowledge.
@@ -79,10 +80,26 @@ def _extract_text(content: str | list) -> str:
 
 
 def _short_id(chunk_id: str) -> str:
-    """Short, display-friendly citation ID. Hashing the full chunk_id (rather than
-    naively slicing its first 8 characters) avoids collisions between sibling chunks
-    that share the same document-hash prefix, e.g. "{doc_hash}:p1-c0" vs "{doc_hash}:p1-c1"."""
+    """Short, stable citation ID used for logging/tracing (never shown to the model or
+    user). Hashing the full chunk_id (rather than naively slicing its first 8 characters)
+    avoids collisions between sibling chunks that share the same document-hash prefix,
+    e.g. "{doc_hash}:p1-c0" vs "{doc_hash}:p1-c1"."""
     return hashlib.sha256(chunk_id.encode()).hexdigest()[:8]
+
+
+def _assign_citation_numbers(docs: list[Document]) -> None:
+    """Assigns each unique chunk a sequential citation number (1, 2, 3...) in retrieval
+    order, stored on the Document's metadata — this is what the model cites with and what
+    the UI shows next to each source. Random-looking hex IDs are hard for a human to
+    visually tell apart at a glance even when they don't actually collide; small sequential
+    integers aren't. The same chunk keeps the same number if it appears more than once
+    (e.g. pulled in by more than one multi-period retrieval pass)."""
+    seen: dict[str, int] = {}
+    for doc in docs:
+        cid = doc.metadata.get("chunk_id", "")
+        if cid not in seen:
+            seen[cid] = len(seen) + 1
+        doc.metadata["citation_number"] = seen[cid]
 
 
 def _trim_history(messages: list) -> list:
@@ -125,20 +142,24 @@ def _expand_tickers(tickers: list[str] | None) -> list[list[str] | None]:
 def _build_context_string(docs: list[Document]) -> str:
     parts = []
     for doc in docs:
-        citation_id = _short_id(doc.metadata.get("chunk_id", ""))
+        citation_number = doc.metadata.get("citation_number", "?")
         ticker = doc.metadata.get("ticker", "")
         filing_type = doc.metadata.get("filing_type", "")
         fiscal_year = doc.metadata.get("fiscal_year", "")
         section = doc.metadata.get("section", "")
         label_parts = [p for p in [ticker, filing_type, f"FY{fiscal_year}" if fiscal_year else "", section] if p]
         label = ", ".join(label_parts) if label_parts else doc.metadata.get("filename", "")
-        header = f"[{citation_id}] ({label})"
+        header = f"[{citation_number}] ({label})"
         parts.append(f"{header}\n{doc.page_content}")
     return "\n\n---\n\n".join(parts)
 
 
+def _citation_universe(docs: list[Document]) -> list[str]:
+    return [str(d.metadata["citation_number"]) for d in docs if d.metadata.get("citation_number") is not None]
+
+
 def _shape_result(answer: str, docs: list[Document], sources: list[dict]) -> dict[str, Any]:
-    citation_metrics = compute_citation_metrics(answer, [_short_id(d.metadata.get("chunk_id", "")) for d in docs])
+    citation_metrics = compute_citation_metrics(answer, _citation_universe(docs))
     return {
         "answer": answer,
         "sources": sources,
@@ -204,6 +225,7 @@ class LCRAGChain:
             else:
                 retriever = build_retriever(self.client, self.collection_name, filters=filters)
                 docs = retriever.invoke(question)
+            _assign_citation_numbers(docs)
             sources = [{**d.metadata, "chunk_id": _short_id(d.metadata.get("chunk_id", ""))} for d in docs]
             return docs, sources
 
@@ -236,6 +258,7 @@ class LCRAGChain:
             retriever = build_retriever(self.client, self.collection_name, filters=single_filter)
             docs = retriever.invoke(question)
 
+        _assign_citation_numbers(docs)
         sources = [{**d.metadata, "chunk_id": _short_id(d.metadata.get("chunk_id", ""))} for d in docs]
         return docs, sources
 
@@ -342,8 +365,7 @@ class LCRAGChain:
             else:
                 full_answer = OUT_OF_SCOPE_MESSAGE
                 yield full_answer
-            chunk_ids = [_short_id(d.metadata.get("chunk_id", "")) for d in docs]
-            citation_metrics = compute_citation_metrics(full_answer, chunk_ids)
+            citation_metrics = compute_citation_metrics(full_answer, _citation_universe(docs))
             _log("stream", question, full_answer, citation_metrics, session_id, filters, docs, start)
             yield {"sources": sources}
             return
@@ -369,7 +391,6 @@ class LCRAGChain:
 
         history.add_user_message(question)
         history.add_ai_message(full_answer)
-        chunk_ids = [_short_id(d.metadata.get("chunk_id", "")) for d in docs]
-        citation_metrics = compute_citation_metrics(full_answer, chunk_ids)
+        citation_metrics = compute_citation_metrics(full_answer, _citation_universe(docs))
         _log("stream", question, full_answer, citation_metrics, session_id, filters, docs, start)
         yield {"sources": sources}

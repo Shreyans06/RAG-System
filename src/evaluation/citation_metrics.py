@@ -1,9 +1,12 @@
 import re
 
-CITATION_PATTERN = re.compile(r"\[([0-9a-f]{8})\]")
+# Citations are sequential per-response numbers (e.g. [1], [2]), not hashed IDs — small
+# integers are far easier for a human to visually scan and tell apart in generated prose
+# than random-looking hex, even though hex IDs were already collision-safe (see D-17).
+CITATION_PATTERN = re.compile(r"\[(\d+)\]")
 
 def extract_citations(response: str) -> list[str]:
-    """Extract citation IDs from a response string."""
+    """Extract citation numbers from a response string."""
     seen: list[str] = []
     for match in CITATION_PATTERN.findall(response):
         if match not in seen:

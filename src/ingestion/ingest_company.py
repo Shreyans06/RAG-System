@@ -50,12 +50,10 @@ def ingest_company_filings(ticker: str, filing_types: list[str], years: list[int
         vector_size=settings.retrieval.get("embedding_dimensions", 3072),
     )
     pipeline = IngestionPipeline(
-        anthropic_api_key=settings.ANTHROPIC_API_KEY,
         strategy=ChunkingStrategy.HIERARCHICAL,
         parent_chunk_size=settings.ingestion.get("parent_chunk_size", 1000),
         child_chunk_size=settings.ingestion.get("child_chunk_size", 200),
         chunk_overlap=settings.ingestion.get("chunk_overlap", 20),
-        contextual_summary_model=settings.ingestion.get("contextual_summary_model", "claude-haiku-4-5"),
     )
 
     total_chunks = 0

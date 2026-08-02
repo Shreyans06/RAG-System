@@ -34,7 +34,6 @@ async def ingest(file: UploadFile, request: Request) -> IngestResponse:
         tmp_path.write_bytes(contents)
 
         pipeline = IngestionPipeline(
-            anthropic_api_key=settings.ANTHROPIC_API_KEY,
             strategy=ChunkingStrategy.HIERARCHICAL,
             parent_chunk_size=settings.ingestion.get("parent_chunk_size", 1000),
             child_chunk_size=settings.ingestion.get("child_chunk_size", 200),

@@ -2,14 +2,23 @@ import argparse
 import sys
 import time
 
-from qdrant_client.models import SparseVector
+from qdrant_client.models import FieldCondition, Filter, MatchValue, SparseVector
 
 from src.config import get_settings
+from src.ingestion.batch_embeddings import queue_for_batch
 from src.ingestion.pipeline import ChunkingStrategy, IngestionPipeline
 from src.ingestion.sec_edgar_client import SECEdgarClient
 from src.ingestion.sec_metadata import SECMetadata
 from src.models.factory import get_embeddings, get_sparse_embeddings
 from src.retrieval.vector_store import create_collection_if_not_exists, make_client, upsert_chunks
+
+
+def _already_ingested(qdrant, collection_name: str, ticker: str, accession_number: str) -> bool:
+    flt = Filter(must=[
+        FieldCondition(key="ticker", match=MatchValue(value=ticker)),
+        FieldCondition(key="accession_number", match=MatchValue(value=accession_number)),
+    ])
+    return qdrant.count(collection_name, count_filter=flt).count > 0
 
 
 def _build_sec_metadata(filing: dict) -> SECMetadata:
@@ -39,6 +48,12 @@ def main() -> int:
              "chunk (Anthropic's contextual retrieval pattern). Default: hierarchical.",
     )
     parser.add_argument("--dry-run", action="store_true", help="list matching filings without downloading/ingesting")
+    parser.add_argument(
+        "--submit-batch", action="store_true",
+        help="submit embeddings via OpenAI's Batch API (~50%% cheaper, results within 24h) instead of "
+             "embedding synchronously. Skips filings already present in Qdrant. Run scripts/resume_batch_ingest.py "
+             "later to pick up results and finish upserting.",
+    )
     args = parser.parse_args()
 
     years = [int(y) for y in args.years.split(",")]
@@ -71,20 +86,28 @@ def main() -> int:
     )
 
     pipeline = IngestionPipeline(
-        anthropic_api_key=settings.ANTHROPIC_API_KEY,
         strategy=strategy,
         parent_chunk_size=settings.ingestion.get("parent_chunk_size", 1000),
         child_chunk_size=settings.ingestion.get("child_chunk_size", 200),
         chunk_overlap=settings.ingestion.get("chunk_overlap", 20),
-        contextual_summary_model=settings.ingestion.get("contextual_summary_model", "claude-haiku-4-5"),
     )
 
     total_chunks = 0
     errors: list[tuple[dict, str]] = []
+    pending_for_batch: list = []
+    skipped = 0
     print()
     for i, filing in enumerate(filings, start=1):
         label = f"{filing['ticker']} {filing['filing_type']} FY{filing['fiscal_year']} {filing['fiscal_period']}"
         print(f"[{i}/{len(filings)}] {label} ...", end=" ", flush=True)
+
+        if args.submit_batch and _already_ingested(
+            qdrant, settings.QDRANT_COLLECTION_NAME, filing["ticker"], filing["accession_number"]
+        ):
+            print("already ingested, skipping")
+            skipped += 1
+            continue
+
         start = time.perf_counter()
         try:
             path = edgar.download_filing(filing)
@@ -96,6 +119,12 @@ def main() -> int:
 
             if not chunks:
                 print("0 chunks, skipping upsert")
+                continue
+
+            if args.submit_batch:
+                pending_for_batch.extend(chunks)
+                total_chunks += len(chunks)
+                print(f"{len(chunks)} chunks staged in {time.perf_counter() - start:.1f}s")
                 continue
 
             texts = [c.content for c in chunks]
@@ -113,7 +142,26 @@ def main() -> int:
             print(f"FAILED: {e}")
             errors.append((filing, str(e)))
 
-    print(f"\nDone. {total_chunks} total chunks upserted across {len(filings) - len(errors)} filing(s).")
+    if args.submit_batch:
+        if skipped:
+            print(f"\nSkipped {skipped} already-ingested filing(s).")
+        if pending_for_batch:
+            n = queue_for_batch(args.ticker.upper(), pending_for_batch)
+            print(
+                f"\nQueued {n} chunks for batch embedding. "
+                f"Run scripts/resume_batch_ingest.py to submit and/or pick up completed jobs "
+                f"(only one batch runs at a time, to stay under OpenAI's enqueued-token limit)."
+            )
+        else:
+            print("\nNothing new to queue.")
+        if errors:
+            print(f"\n{len(errors)} filing(s) failed:")
+            for filing, err in errors:
+                print(f"  {filing['ticker']} {filing['filing_type']} {filing['accession_number']}: {err}")
+            return 1
+        return 0
+
+    print(f"\nDone. {total_chunks} total chunks upserted across {len(filings) - len(errors) - skipped} filing(s).")
     if errors:
         print(f"\n{len(errors)} filing(s) failed:")
         for filing, err in errors:

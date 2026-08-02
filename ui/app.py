@@ -110,21 +110,20 @@ if question := st.chat_input("Ask a question about your documents"):
 
             if sources:
                 with st.expander("Sources"):
-                    for s in sources:
+                    for s in sorted(sources, key=lambda s: s.get("citation_number") or 0):
                         ticker = s.get("ticker", "")
                         filing_type = s.get("filing_type", "")
                         fiscal_year = s.get("fiscal_year", "")
                         section = s.get("section", "")
                         filename = s.get("filename", "unknown")
-                        chunk_id = s.get("chunk_id", "")
+                        citation_number = s.get("citation_number")
                         score = s.get("relevance_score")
 
                         year_label = f"FY{fiscal_year}" if fiscal_year else ""
                         label_parts = [p for p in [ticker, filing_type, year_label, section] if p]
                         label = ", ".join(label_parts) if label_parts else filename
-                        line_str = f"**{label}**"
-                        if chunk_id:
-                            line_str += f" `[{chunk_id}]`"
+                        marker = f"`[{citation_number}]`" if citation_number is not None else ""
+                        line_str = f"{marker} **{label}**"
                         if score is not None:
                             line_str += f" — relevance {score:.2f}"
                         st.markdown(line_str)

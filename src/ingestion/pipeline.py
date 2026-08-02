@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from enum import StrEnum
 from pathlib import Path
 
@@ -28,17 +29,16 @@ _IMAGE_SUFFIXES = {".png" , ".jpg" , ".jpeg" , ".webp"}
 # SEC page-footers use pipe-delimited "Company | Form | Page N" text;
 # real prose never contains a literal pipe
 _JUNK_CAPTION_PATTERN = re.compile(r"\|")
+_TABLE_DESCRIBE_MAX_WORKERS = 5
 
 
-def _build_table_content(doc: IngestionItem, api_key: str | None, model: str) -> str:
+def _build_table_content(doc: IngestionItem) -> str:
     section = doc.metadata.get("section", "")
     caption = doc.metadata.get("table_caption", "")
     if caption and _JUNK_CAPTION_PATTERN.search(caption):
         caption = ""
 
-    description = ""
-    if api_key:
-        description = describe_table(section, caption, doc.content, api_key, model)
+    description = describe_table(section, caption, doc.content)
 
     parts = [p for p in [section, caption, description] if p]
     parts.append(doc.content)
@@ -51,21 +51,17 @@ class ChunkingStrategy(StrEnum):
 class IngestionPipeline:
     def __init__(
         self,
-        anthropic_api_key: str | None = None,
         strategy: ChunkingStrategy = ChunkingStrategy.HIERARCHICAL,
         parent_chunk_size: int = 1000,
         child_chunk_size: int = 200,
         chunk_overlap: int = 20,
-        contextual_summary_model: str = "claude-haiku-4-5",
         render_pdf_pages_as_images: bool = False,
         min_image_area_px: int = 5000,
     ) -> None:
-        self.anthropic_api_key = anthropic_api_key
         self.strategy = strategy
         self.parent_chunk_size = parent_chunk_size
         self.child_chunk_size = child_chunk_size
         self.chunk_overlap = chunk_overlap
-        self.contextual_summary_model = contextual_summary_model
         self.render_pdf_pages_as_images = render_pdf_pages_as_images
         self.min_image_area_px = min_image_area_px
     
@@ -120,8 +116,6 @@ class IngestionPipeline:
                 if self.strategy == ChunkingStrategy.CONTEXTUAL:
                     chunks.extend(chunk_with_context(
                         doc,
-                        api_key=self.anthropic_api_key if self.anthropic_api_key else "",
-                        model=self.contextual_summary_model,
                         chunk_size=self.child_chunk_size,
                         overlap=self.chunk_overlap,
                     ))
@@ -138,25 +132,33 @@ class IngestionPipeline:
 
 
     def _chunks_from_tables(self, table_docs: list[IngestionItem]) -> tuple[list[Chunk], list[str]]:
-        """One chunk per table."""
+        """One chunk per table. Table descriptions (D-16) are the dominant per-filing LLM
+        cost/latency, so they're generated concurrently across tables rather than one at a
+        time — same pattern chunk_with_context() already uses for text-chunk summaries."""
         chunks: list[Chunk] = []
         errors: list[str] = []
-        for doc in table_docs:
-            try:
-                if not doc.content.strip():
-                    continue
-                content = _build_table_content(doc, self.anthropic_api_key, self.contextual_summary_model)
+        docs = [d for d in table_docs if d.content.strip()]
 
-                chunks.append(Chunk(
-                    id=doc.id,
-                    document_id=doc.id,
-                    parent_chunk_id=None,
-                    content=content,
-                    content_type=ContentType.TABLE,
-                    metadata=dict(doc.metadata),
-                ))
-            except Exception as e:
-                errors.append(f"Failed to build table chunk: {e}")
+        contents: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=_TABLE_DESCRIBE_MAX_WORKERS) as executor:
+            future_to_doc = {executor.submit(_build_table_content, doc): doc for doc in docs}
+            for future, doc in future_to_doc.items():
+                try:
+                    contents[doc.id] = future.result()
+                except Exception as e:
+                    errors.append(f"Failed to build table chunk: {e}")
+
+        for doc in docs:
+            if doc.id not in contents:
+                continue
+            chunks.append(Chunk(
+                id=doc.id,
+                document_id=doc.id,
+                parent_chunk_id=None,
+                content=contents[doc.id],
+                content_type=ContentType.TABLE,
+                metadata=dict(doc.metadata),
+            ))
         return chunks, errors
 
 

@@ -5,8 +5,8 @@ ingestion:
   chunk_overlap: 20             # tokens
 
   # Contextual chunker
-  contextual_summary_provider: "anthropic"
-  contextual_summary_model: "claude-haiku-4-5"  # cheap model for context injection
+  contextual_summary_provider: "openai"
+  contextual_summary_model: "gpt-5.4-mini"  # cheap model for context injection
 
   # Multimodal
   render_pdf_pages_as_images: true   # render pages with figures to images
