@@ -204,7 +204,10 @@ class LCRAGChain:
             periods = extracted.fiscal_periods if extracted and extracted.fiscal_periods else []
             years = extracted.fiscal_years if extracted and extracted.fiscal_years else []
             pairs = _expand_period_year_pairs(periods, years)
-            if len(pairs) > 1:
+            if len(pairs) >= 1:
+                # >= 1, not > 1: a *single* detected period/year still needs to narrow the
+                # explicit filter (e.g. "Q1 2025" shouldn't search all of FY2025's quarters) —
+                # only truly zero detected pairs should fall back to the caller's filter as-is.
                 docs: list[Document] = []
                 # Strip any fiscal_year/fiscal_period the caller's base filter already carries —
                 # each pair sets its own, and ANDing both would make every pair but one impossible

@@ -8,7 +8,8 @@ from pathlib import Path
 from src.config import get_settings
 from src.evaluation.dataset import load_eval_dataset
 from src.evaluation.metrics import build_judge_embeddings, build_judge_llm, compute_ragas_metrics
-from src.evaluation.models import EvalReport, EvalResult
+from src.evaluation.models import EvalReport, EvalResult, QuestionType
+from src.evaluation.refusal_metrics import refusal_correctness
 from src.generation.history import get_session_history
 from src.generation.lc_rag_chain import LCRAGChain
 from src.retrieval.filters import build_filter
@@ -63,7 +64,6 @@ def _run_turn(
         answer=output.get("answer", ""),
         retrieved_chunk_ids=[s["chunk_id"] for s in output["sources"]],
         retrieved_contexts=contexts,
-        citation_precision=output.get("citation_precision"),
         citation_coverage=output.get("citation_coverage"),
         excerpt_found_in_retrieval=excerpt_found,
         latency_ms=latency,
@@ -118,7 +118,19 @@ def run_eval(
             question_type_by_id[turn_id] = example.question_type.value
 
     scored = [r for r in results if r.error is None]
-    if scored:
+
+    # `unanswerable` questions make no factual claims when correctly refused, so RAGAS's
+    # claim-verification metrics (faithfulness, context_precision, etc.) structurally
+    # score them ~0 regardless of whether the refusal was correct — excluded from the
+    # RAGAS pass entirely (also saves a judge-LLM call per question) and scored instead
+    # by refusal_correctness below (see D-33).
+    def _is_unanswerable(r: EvalResult) -> bool:
+        return question_type_by_id.get(r.example_id) == QuestionType.UNANSWERABLE.value
+
+    ragas_eligible = [r for r in scored if not _is_unanswerable(r)]
+    unanswerable_scored = [r for r in scored if _is_unanswerable(r)]
+
+    if ragas_eligible:
         judge_llm = build_judge_llm(
             provider=settings.evaluation.get("judge_provider", "openai"),
             model=settings.evaluation.get("judge_model", "gpt-5.4-mini"),
@@ -130,28 +142,37 @@ def run_eval(
         )
 
         per_row = compute_ragas_metrics(
-            questions=[r.question for r in scored],
-            answers=[r.answer for r in scored],
-            contexts=[r.retrieved_contexts for r in scored],
-            ground_truths=[ground_truth_by_id[r.example_id] for r in scored],
+            questions=[r.question for r in ragas_eligible],
+            answers=[r.answer for r in ragas_eligible],
+            contexts=[r.retrieved_contexts for r in ragas_eligible],
+            ground_truths=[ground_truth_by_id[r.example_id] for r in ragas_eligible],
             judge_llm=judge_llm,
             judge_embeddings=judge_embeddings,
             metric_names=ragas_metrics,
         )
 
-        for result, scores in zip(scored, per_row):
+        for result, scores in zip(ragas_eligible, per_row):
             result.faithfulness = scores.get("faithfulness")
             result.answer_relevancy = scores.get("answer_relevancy")
             result.context_precision = scores.get("context_precision")
             result.context_recall = scores.get("context_recall")
+            result.context_entity_recall = scores.get("context_entity_recall")
+            result.noise_sensitivity = scores.get("noise_sensitivity")
+
+    for result in unanswerable_scored:
+        result.refusal_correctness = refusal_correctness(result.answer)
 
     aggregates = {
         "faithfulness": _mean([r.faithfulness for r in results if r.faithfulness is not None]),
         "answer_relevancy": _mean([r.answer_relevancy for r in results if r.answer_relevancy is not None]),
         "context_precision": _mean([r.context_precision for r in results if r.context_precision is not None]),
         "context_recall": _mean([r.context_recall for r in results if r.context_recall is not None]),
-        "citation_precision": _mean([r.citation_precision for r in results if r.citation_precision is not None]),
+        "context_entity_recall": _mean(
+            [r.context_entity_recall for r in results if r.context_entity_recall is not None]
+        ),
+        "noise_sensitivity": _mean([r.noise_sensitivity for r in results if r.noise_sensitivity is not None]),
         "citation_coverage": _mean([r.citation_coverage for r in results if r.citation_coverage is not None]),
+        "refusal_correctness": _mean([r.refusal_correctness for r in results if r.refusal_correctness is not None]),
         "retrieval_recall_at_k": _mean(
             [1.0 if r.excerpt_found_in_retrieval else 0.0 for r in results if r.error is None]
         ),
@@ -188,15 +209,16 @@ def _write_report(report: EvalReport, question_type_by_id: dict[str, str]) -> No
         "",
         "## Per-Example Results",
         "",
-        "| ID | Type | Faithfulness | Citation Precision | Excerpt Found | Error |",
-        "|---|---|---|---|---|---|",
+        "| ID | Type | Faithfulness | Noise Sensitivity | Refusal Correctness | Excerpt Found | Error |",
+        "|---|---|---|---|---|---|---|",
     ]
     for r in report.results:
         qtype = question_type_by_id.get(r.example_id, "")
         lines.append(
             f"| {r.example_id} | {qtype} "
             f"| {r.faithfulness if r.faithfulness is not None else 'N/A'} "
-            f"| {r.citation_precision if r.citation_precision is not None else 'N/A'} "
+            f"| {r.noise_sensitivity if r.noise_sensitivity is not None else 'N/A'} "
+            f"| {r.refusal_correctness if r.refusal_correctness is not None else 'N/A'} "
             f"| {r.excerpt_found_in_retrieval} | {r.error or ''} |"
         )
     (reports_dir / f"{stamp}.md").write_text("\n".join(lines))

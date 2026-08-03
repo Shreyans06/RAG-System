@@ -38,12 +38,12 @@ evaluation:
   faithfulness_threshold: 0.80
   answer_relevancy_threshold: 0.75
   context_precision_threshold: 0.70
-
-memory:
-  session_ttl_seconds: 1800  # 30 min of inactivity before a session's history expires
-  max_history_messages: 6    # last 3 turns (human+ai pairs) kept in the prompt
   eval_dataset_path: "eval/datasets/sec_qa_v1.jsonl"
   judge_provider: "openai"
   judge_model: "gpt-5.4-mini"
   judge_embedding_model: "text-embedding-3-small"
+
+memory:
+  session_ttl_seconds: 1800  # 30 min of inactivity before a session's history expires
+  max_history_messages: 6    # last 3 turns (human+ai pairs) kept in the prompt
 

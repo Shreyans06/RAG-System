@@ -32,13 +32,15 @@ _JUNK_CAPTION_PATTERN = re.compile(r"\|")
 _TABLE_DESCRIBE_MAX_WORKERS = 5
 
 
-def _build_table_content(doc: IngestionItem) -> str:
+def _build_table_content(doc: IngestionItem, sec_metadata: SECMetadata | None = None) -> str:
     section = doc.metadata.get("section", "")
     caption = doc.metadata.get("table_caption", "")
     if caption and _JUNK_CAPTION_PATTERN.search(caption):
         caption = ""
 
-    description = describe_table(section, caption, doc.content)
+    fiscal_period = sec_metadata.fiscal_period if sec_metadata else ""
+    fiscal_year = str(sec_metadata.fiscal_year) if sec_metadata else ""
+    description = describe_table(section, caption, doc.content, fiscal_period, fiscal_year)
 
     parts = [p for p in [section, caption, description] if p]
     parts.append(doc.content)
@@ -90,7 +92,7 @@ class IngestionPipeline:
         all_chunks.extend(text_chunks)
         errors.extend(chunk_errors)
 
-        table_chunks, table_errors = self._chunks_from_tables(table_docs)
+        table_chunks, table_errors = self._chunks_from_tables(table_docs, sec_metadata)
         all_chunks.extend(table_chunks)
         errors.extend(table_errors)
 
@@ -131,7 +133,9 @@ class IngestionPipeline:
         return chunks, errors
 
 
-    def _chunks_from_tables(self, table_docs: list[IngestionItem]) -> tuple[list[Chunk], list[str]]:
+    def _chunks_from_tables(
+        self, table_docs: list[IngestionItem], sec_metadata: SECMetadata | None = None,
+    ) -> tuple[list[Chunk], list[str]]:
         """One chunk per table. Table descriptions (D-16) are the dominant per-filing LLM
         cost/latency, so they're generated concurrently across tables rather than one at a
         time — same pattern chunk_with_context() already uses for text-chunk summaries."""
@@ -141,7 +145,7 @@ class IngestionPipeline:
 
         contents: dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=_TABLE_DESCRIBE_MAX_WORKERS) as executor:
-            future_to_doc = {executor.submit(_build_table_content, doc): doc for doc in docs}
+            future_to_doc = {executor.submit(_build_table_content, doc, sec_metadata): doc for doc in docs}
             for future, doc in future_to_doc.items():
                 try:
                     contents[doc.id] = future.result()

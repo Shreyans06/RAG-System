@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import math
+
 from datasets import Dataset
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from ragas import evaluate
 from ragas.embeddings import LangchainEmbeddingsWrapper
 from ragas.llms import LangchainLLMWrapper
-from ragas.metrics import answer_relevancy, context_precision, context_recall, faithfulness
+from ragas.metrics import (
+    NoiseSensitivity,
+    answer_relevancy,
+    context_entity_recall,
+    context_precision,
+    context_recall,
+    faithfulness,
+)
 
 from src.config import get_settings
 
@@ -15,6 +24,8 @@ _METRICS = {
     "answer_relevancy": answer_relevancy,
     "context_precision": context_precision,
     "context_recall": context_recall,
+    "context_entity_recall": context_entity_recall,
+    "noise_sensitivity": NoiseSensitivity(),
 }
 
 
@@ -82,12 +93,26 @@ def compute_ragas_metrics(
     n = len(questions)
     per_row: list[dict[str , float | None]] = [dict.fromkeys(_METRICS.keys(), None) for _ in range(n)]
 
+    _base_columns = {"user_input", "retrieved_contexts", "response", "reference"}
+
     for name , metric in metrics_to_run.items():
         try:
             result = evaluate(dataset , metrics = [metric] , llm = wrapped_llm , embeddings = wrapped_embeddings)
-            scores = result.to_pandas()[name].tolist()
+            df = result.to_pandas()
+            # Some metrics (e.g. NoiseSensitivity) name their output column after their
+            # mode/params (e.g. "noise_sensitivity(mode=relevant)") rather than the plain
+            # metric name — since exactly one metric is evaluated per call, take whichever
+            # column isn't one of the dataset's own base columns.
+            metric_columns = [c for c in df.columns if c not in _base_columns]
+            scores = df[metric_columns[0]].tolist()
             for i , score in enumerate(scores):
-                per_row[i][name] = float(score)
+                # RAGAS metrics (e.g. NoiseSensitivity) can return NaN for an individual
+                # row — e.g. when its internal claim-decomposition step yields zero claims
+                # to score — rather than raising. Store None instead of NaN so this row is
+                # treated as "not available" everywhere downstream (aggregation, report
+                # formatting) instead of silently poisoning a sum/mean to NaN.
+                value = float(score)
+                per_row[i][name] = None if math.isnan(value) else value
         except Exception as e:
             print(f"[metrics] RAGAS metric '{name}' evaluation failed: {e}")
     

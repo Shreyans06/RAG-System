@@ -46,10 +46,15 @@ class EvalResult:
     answer_relevancy: float | None = None
     context_precision: float | None = None
     context_recall: float | None = None
+    context_entity_recall: float | None = None
+    noise_sensitivity: float | None = None
 
-    # Rule-based citation metrics
-    citation_precision: float | None = None
+    # Rule-based citation metric
     citation_coverage: float | None = None
+
+    # Rule-based refusal-correctness metric — only set for `unanswerable` questions,
+    # which are excluded from the RAGAS metrics above (see D-33)
+    refusal_correctness: float | None = None
 
     # Retrieval-only signal: did any retrieved context contain the ground truth answer?
     excerpt_found_in_retrieval: bool = False
